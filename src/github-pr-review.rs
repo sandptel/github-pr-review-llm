@@ -132,7 +132,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
 
     let pulls = octo.pulls(owner.clone(), repo.clone());
     let mut resp = String::new();
-    resp.push_str("Hello, I am a [code review agent](https://github.com/flows-network/github-pr-review/) on [flows.network](https://flows.network/). Here are my reviews of changed source code files in this PR.\n\n------\n\n");
+    resp.push_str("Hello, I am a [code review agent](https://github.com/flows-network/github-pr-review/) on [flows.network](https://flows.network/). Here is my review on the PR.\n\n------\n\n");
     match pulls.list_files(pull_number).await {
         Ok(files) => {
             // let client = reqwest::Client::new();
