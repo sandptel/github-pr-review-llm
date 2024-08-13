@@ -7,6 +7,7 @@ use github_flows::{
     octocrab::models::webhook_events::payload::{IssueCommentWebhookEventAction, PullRequestWebhookEventAction},
     GithubLogin,
 };
+use github_flows::octocrab::models::repos::Content;
 use llmservice_flows::{
     chat::{ChatOptions},
     LLMServiceFlows,
@@ -18,7 +19,7 @@ use std::env;
 pub async fn on_deploy() {
     dotenv().ok();
     logger::init();
-    log::debug!("Running github-pr-review/main");
+    log::debug!("Running github-pr-summary/main");
 
     let owner = env::var("github_owner").unwrap_or("juntao".to_string());
     let repo = env::var("github_repo").unwrap_or("test".to_string());
@@ -26,26 +27,36 @@ pub async fn on_deploy() {
     listen_to_event(&GithubLogin::Default, &owner, &repo, vec!["pull_request", "issue_comment"]).await;
 }
 
+use github_flows::octocrab;
+
+use std::error::Error; 
+
+async fn fetch_directory_tree(owner: &str, repo: &str, path: &str) -> Result<Vec<Content>, Box<dyn Error>> {
+    let octo = octocrab::instance(); // Adjust according to your octocrab setup
+    let content_items = octo.repos(owner, repo).get_content().path(path).send().await?;
+    
+    let contents = content_items.items;
+    Ok(contents)
+}
+
 #[event_handler]
 async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     dotenv().ok();
     logger::init();
-    log::debug!("Running github-pr-review/main handler()");
+    log::debug!("Running github-pr-summary/main handler()");
 
-    let owner = env::var("github_owner").unwrap_or("juntao".to_string());
-    let repo = env::var("github_repo").unwrap_or("test".to_string());
-    let trigger_phrase = env::var("trigger_phrase").unwrap_or("flows review".to_string());
-    let llm_api_endpoint = env::var("llm_api_endpoint").unwrap_or("https://api.openai.com/v1".to_string());
-    let llm_model_name = env::var("llm_model_name").unwrap_or("gpt-4o".to_string());
-    let llm_ctx_size = env::var("llm_ctx_size").unwrap_or("16384".to_string()).parse::<u32>().unwrap_or(0);
-    let llm_api_key = env::var("llm_api_key").unwrap_or("LLAMAEDGE".to_string());
+    let owner = env::var("github_owner").unwrap_or_else(|_| "juntao".to_string());
+    let repo = env::var("github_repo").unwrap_or_else(|_| "test".to_string());
+    let trigger_phrase = env::var("trigger_phrase").unwrap_or_else(|_| "flows summarize".to_string());
+    let llm_api_endpoint = env::var("llm_api_endpoint").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    let llm_model_name = env::var("llm_model_name").unwrap_or_else(|_| "gpt-4".to_string());
+    let llm_ctx_size = env::var("llm_ctx_size").unwrap_or_else(|_| "16384".to_string()).parse::<u32>().unwrap_or(0);
+    let llm_api_key = env::var("llm_api_key").unwrap_or_else(|_| "LLAMAEDGE".to_string());
 
-    //  The soft character limit of the input context size
-    //  This is measured in chars. We set it to be 2x llm_ctx_size, which is measured in tokens.
-    let ctx_size_char : usize = (2 * llm_ctx_size).try_into().unwrap_or(0);
+    let ctx_size_char: usize = (2 * llm_ctx_size).try_into().unwrap_or(0);
 
     let payload = event.unwrap();
-    let mut new_commit : bool = false;
+    let mut new_commit: bool = false;
     let (title, pull_number, _contributor) = match payload.specific {
         WebhookEventPayload::PullRequest(e) => {
             if e.action == PullRequestWebhookEventAction::Opened {
@@ -54,12 +65,12 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
                 new_commit = true;
                 log::debug!("Received payload: PR Synced");
             } else {
-                log::debug!("Not a Opened or Synchronize event for PR");
+                log::debug!("Not an Opened or Synchronize event for PR");
                 return;
             }
             let p = e.pull_request;
             (
-                p.title.unwrap_or("".to_string()),
+                p.title.unwrap_or_else(|| "Untitled".to_string()),
                 p.number,
                 p.user.unwrap().login,
             )
@@ -73,17 +84,13 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
 
             let body = e.comment.body.unwrap_or_default();
 
-            // if e.comment.performed_via_github_app.is_some() {
-            //     return;
-            // }
-            // TODO: Makeshift but operational
-            if body.starts_with("Hello, I am a [code review agent]") {
-                log::info!("Ignore comment via agent");
+            if body.starts_with("Hello, I am a [PR summary agent]") {
+                log::info!("Ignore comment via bot");
                 return;
             };
 
             if !body.to_lowercase().starts_with(&trigger_phrase.to_lowercase()) {
-                log::info!("Ignore the comment without magic words");
+                log::info!("Ignore the comment without the magic words");
                 return;
             }
 
@@ -92,20 +99,14 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
         _ => return,
     };
 
-    let chat_id = format!("PR#{pull_number}");
-    let system = &format!("You are an experienced software developer. You will review a source code file and its patch related to the subject of \"{}\". Please be as concise as possible while being accurate.", title);
-    let mut lf = LLMServiceFlows::new(&llm_api_endpoint);
-    lf.set_api_key(&llm_api_key);
-
     let octo = get_octo(&GithubLogin::Default);
     let issues = octo.issues(owner.clone(), repo.clone());
     let mut comment_id: CommentId = 0u64.into();
     if new_commit {
-        // Find the first "Hello, I am a [code review agent]" comment to update
         match issues.list_comments(pull_number).send().await {
             Ok(comments) => {
                 for c in comments.items {
-                    if c.body.unwrap_or_default().starts_with("Hello, I am a [code review agent]") {
+                    if c.body.unwrap_or_default().starts_with("Hello, I am a [PR summary agent]") {
                         comment_id = c.id;
                         break;
                     }
@@ -117,8 +118,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
             }
         }
     } else {
-        // PR OPEN or Trigger phrase: create a new comment
-        match issues.create_comment(pull_number, "Hello, I am a [code review agent](https://github.com/flows-network) on [flows.network](https://flows.network/).\n\nIt could take a few minutes for me to analyze this PR. Relax, grab a cup of coffee and check back later. Thanks!").await {
+        match issues.create_comment(pull_number, "Hello, I am a [PR summary agent](https://github.com/flows-network/github-pr-summary/) on [flows.network](https://flows.network/).\n\nIt could take a few minutes for me to analyze this PR. Relax, grab a cup of coffee and check back later. Thanks!").await {
             Ok(comment) => {
                 comment_id = comment.id;
             }
@@ -130,111 +130,114 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     }
     if comment_id == 0u64.into() { return; }
 
+    // **Fetch directory tree**
+    let dir_tree_result = fetch_directory_tree(&owner, &repo, "").await;
+    let dir_tree = match dir_tree_result {
+        Ok(tree) => tree,
+        Err(e) => {
+            log::error!("Error fetching directory tree: {}", e);
+            return;
+        }
+    };
+
     let pulls = octo.pulls(owner.clone(), repo.clone());
-    let mut resp = String::new();
-    resp.push_str("Hello, I am a [code review agent](https://github.com/flows-network) on [flows.network](https://flows.network/). Here is my review on the PR.\n\n------\n\n");
-    match pulls.list_files(pull_number).await {
-        Ok(files) => {
-            // let client = reqwest::Client::new();
-            for f in files.items {
-                let filename = &f.filename;
-                if filename.ends_with(".md") || filename.ends_with(".js") || filename.ends_with(".css") || filename.ends_with(".html") || filename.ends_with(".htm") {
-                    continue;
-                }
-
-                // The f.raw_url is a redirect. So, we need to construct our own here.
-                let contents_url = f.contents_url.as_str();
-                if contents_url.len() < 40 { continue; }
-                let hash = &contents_url[(contents_url.len() - 40)..];
-                let raw_url = format!(
-                    "https://raw.githubusercontent.com/{owner}/{repo}/{}/{}", hash, filename
-                );
-
-                log::debug!("Fetching url: {}", raw_url);
-                let res = match reqwest::get(raw_url.as_str()).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        log::error!("Error fetching file {}: {}", filename, e);
-                        continue;
-                    }
-                };
-                // let res = reqwest::get(raw_url.as_str()).await.unwrap();
-                // let res = client.get(raw_url.as_str()).send().await.unwrap();
-                log::debug!("Fetched file: {}", filename);
-                let file_as_text = res.text().await.unwrap();
-                let t_file_as_text = truncate(&file_as_text, ctx_size_char);
-
-                resp.push_str("## [");
-                resp.push_str(filename);
-                resp.push_str("](");
-                resp.push_str(f.blob_url.as_str());
-                resp.push_str(")\n\n");
-
-                log::debug!("Sending file to LLM: {}", filename);
-                let co = ChatOptions {
-                    model: Some(&llm_model_name),
-                    token_limit: llm_ctx_size,
-                    restart: true,
-                    system_prompt: Some(system),
-                    ..Default::default()
-                };
-                let question = "Review the following source code and look for bugs. Be very concise and explain each bug in one sentence. The code might be truncated. NEVER comment on the completeness of the source code.\n\n".to_string() + t_file_as_text;
-                match lf.chat_completion(&chat_id, &question, &co).await {
-                    Ok(r) => {
-                        resp.push_str("#### Potential issues");
-                        resp.push_str("\n\n");
-                        resp.push_str(&r.choice);
-                        resp.push_str("\n\n");
-                        log::debug!("Received LLM resp for file: {}", filename);
-                    }
-                    Err(e) => {
-                        resp.push_str("#### Potential issues");
-                        resp.push_str("\n\n");
-                        resp.push_str("N/A");
-                        resp.push_str("\n\n");
-                        log::error!("LLM returns error for file review for {}: {}", filename, e);
-                    }
-                }
-
-                log::debug!("Sending patch to LLM: {}", filename);
-                let co = ChatOptions {
-                    model: Some(&llm_model_name),
-                    token_limit: llm_ctx_size,
-                    restart: true,
-                    system_prompt: Some(system),
-                    ..Default::default()
-                };
-                let patch_as_text = f.patch.unwrap_or("".to_string());
-                let t_patch_as_text = truncate(&patch_as_text, ctx_size_char);
-                let question = "The following is a change patch for the file. Please summarize key changes in short bullet points.\n\n".to_string() + t_patch_as_text;
-                match lf.chat_completion(&chat_id, &question, &co).await {
-                    Ok(r) => {
-                        resp.push_str("#### Summary of changes");
-                        resp.push_str("\n\n");
-                        resp.push_str(&r.choice);
-                        resp.push_str("\n\n");
-                        log::debug!("Received LLM resp for patch: {}", filename);
-                    }
-                    Err(e) => {
-                        resp.push_str("#### Summary of changes");
-                        resp.push_str("\n\n");
-                        resp.push_str("N/A");
-                        resp.push_str("\n\n");
-                        log::error!("LLM returns error for patch review for {}: {}", filename, e);
-                    }
-                }
+    let patch_as_text = pulls.get_patch(pull_number).await.unwrap();
+    let mut current_commit = String::new();
+    let mut commits: Vec<String> = Vec::new();
+    for line in patch_as_text.lines() {
+        if line.starts_with("From ") {
+            if !current_commit.is_empty() {
+                commits.push(current_commit.clone());
             }
-        },
-        Err(_error) => {
-            log::error!("Cannot get file list");
+            current_commit.clear();
+        }
+        if current_commit.len() < ctx_size_char {
+            current_commit.push_str(line);
+            current_commit.push('\n');
+        }
+    }
+    if !current_commit.is_empty() {
+        commits.push(current_commit.clone());
+    }
+
+    if commits.is_empty() {
+        log::error!("Cannot parse any commit from the patch file");
+        return;
+    }
+
+    let chat_id = format!("PR#{pull_number}");
+    let system = &format!("You are an experienced software developer. You will act as a reviewer for a GitHub Pull Request titled \"{}\". Please be as concise as possible while being accurate.", title);
+    let mut lf = LLMServiceFlows::new(&llm_api_endpoint);
+    lf.set_api_key(&llm_api_key);
+
+    let mut reviews: Vec<String> = Vec::new();
+    let mut reviews_text = String::new();
+    for (i, commit) in commits.iter().enumerate() {
+        let commit_hash = &commit[5..45];
+        log::debug!("Sending patch to LLM: {}", commit_hash);
+        let co = ChatOptions {
+            model: Some(&llm_model_name),
+            token_limit: llm_ctx_size,
+            restart: true,
+            system_prompt: Some(system),
+            ..Default::default()
+        };
+        let question = format!("The following is a GitHub patch. Please summarize the key changes in concise points. Start with the most important findings.\n\n{}", truncate(commit, ctx_size_char));
+        match lf.chat_completion(&chat_id, &question, &co).await {
+            Ok(r) => {
+                if reviews_text.len() < ctx_size_char {
+                    reviews_text.push_str("------\n");
+                    reviews_text.push_str(&r.choice);
+                    reviews_text.push_str("\n");
+                }
+                let mut review = String::new();
+                review.push_str(&format!("### [Commit {}](https://github.com/{}/pull/{}/commits/{})\n", commit_hash, owner, pull_number, commit_hash));
+                review.push_str(&r.choice);
+                review.push_str("\n\n");
+                reviews.push(review);
+                log::debug!("Received LLM response for patch: {}", commit_hash);
+            }
+            Err(e) => {
+                log::error!("LLM returned an error for commit {}: {}", commit_hash, e);
+            }
         }
     }
 
-    // Send the entire response to GitHub PR
-    // issues.create_comment(pull_number, resp).await.unwrap();
+    let mut resp = String::new();
+    resp.push_str("Hello, I am a [PR summary agent](https://github.com/flows-network/github-pr-summary/) on [flows.network](https://flows.network/). Here are my reviews of code commits in this PR.\n\n------\n\n");
+
+    // **Add directory tree to response**
+    let dir_tree_text = dir_tree.iter().map(|c| format!("{}/{}", c.path, c.name)).collect::<Vec<String>>().join("\n");
+    resp.push_str(&format!("## Directory Tree\n\n{}\n\n", dir_tree_text));
+
+    if reviews.len() > 1 {
+        log::debug!("Sending all reviews to LLM for summarization");
+        let co = ChatOptions {
+            model: Some(&llm_model_name),
+            token_limit: llm_ctx_size,
+            restart: true,
+            system_prompt: Some(system),
+            ..Default::default()
+        };
+        let question = format!("Here is a set of summaries for source code patches in this PR. Each summary starts with a ------ line. Write an overall summary. Present the potential issues and errors first, followed by the most important findings, in your summary.\n\n{}", reviews_text);
+        match lf.chat_completion(&chat_id, &question, &co).await {
+            Ok(r) => {
+                resp.push_str(&r.choice);
+                resp.push_str("\n\n## Details\n\n");
+                log::debug!("Received the overall summary");
+            }
+            Err(e) => {
+                log::error!("LLM returned an error for the overall summary: {}", e);
+            }
+        }
+    }
+    for review in reviews.iter() {
+        resp.push_str(review);
+    }
+
     match issues.update_comment(comment_id, resp).await {
         Err(error) => {
-            log::error!("Error posting resp: {}", error);
+            log::error!("Error posting response: {}", error);
         }
         _ => {}
     }
@@ -242,7 +245,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
 
 fn truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
+        Some((i, _)) => &s[..i],
         None => s,
-        Some((idx, _)) => &s[..idx],
     }
 }
