@@ -45,13 +45,14 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     logger::init();
     log::debug!("Running github-pr-summary/main handler()");
 
-    let owner = env::var("github_owner").unwrap_or_else(|_| "juntao".to_string());
-    let repo = env::var("github_repo").unwrap_or_else(|_| "test".to_string());
-    let trigger_phrase = env::var("trigger_phrase").unwrap_or_else(|_| "flows summarize".to_string());
-    let llm_api_endpoint = env::var("llm_api_endpoint").unwrap_or_else(|_| "https://codestral.us.gaianet.network/v1".to_string());
-    let llm_model_name = env::var("llm_model_name").unwrap_or_else(|_| "codestral".to_string());
-    let llm_ctx_size = env::var("llm_ctx_size").unwrap_or_else(|_| "32768".to_string()).parse::<u32>().unwrap_or(0);
-    let llm_api_key = env::var("llm_api_key").unwrap_or_else(|_| "LLAMAEDGE".to_string());
+    let owner = env::var("github_owner").unwrap_or("juntao".to_string());
+    let repo = env::var("github_repo").unwrap_or("test".to_string());
+    let trigger_phrase = env::var("trigger_phrase").unwrap_or("flows summarize".to_string());
+    let llm_api_endpoint = env::var("llm_api_endpoint").unwrap_or("https://api.openai.com/v1".to_string());
+    let llm_model_name = env::var("llm_model_name").unwrap_or("gpt-4o".to_string());
+    let llm_ctx_size = env::var("llm_ctx_size").unwrap_or("16384".to_string()).parse::<u32>().unwrap_or(0);
+    let llm_api_key = env::var("llm_api_key").unwrap_or("LLAMAEDGE".to_string());
+
 
     let ctx_size_char: usize = (2 * llm_ctx_size).try_into().unwrap_or(0);
 
