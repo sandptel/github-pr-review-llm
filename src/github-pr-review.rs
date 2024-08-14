@@ -7,7 +7,6 @@ use github_flows::{
     octocrab::models::webhook_events::payload::{IssueCommentWebhookEventAction, PullRequestWebhookEventAction},
     GithubLogin,
 };
-use github_flows::octocrab::models::repos::Content;
 use llmservice_flows::{
     chat::{ChatOptions},
     LLMServiceFlows,
@@ -27,18 +26,6 @@ pub async fn on_deploy() {
     listen_to_event(&GithubLogin::Default, &owner, &repo, vec!["pull_request", "issue_comment"]).await;
 }
 
-use github_flows::octocrab;
-
-use std::error::Error; 
-
-async fn fetch_directory_tree(owner: &str, repo: &str, path: &str) -> Result<Vec<Content>, Box<dyn Error>> {
-    let octo = octocrab::instance(); // Adjust according to your octocrab setup
-    let content_items = octo.repos(owner, repo).get_content().path(path).send().await?;
-    
-    let contents = content_items.items;
-    Ok(contents)
-}
-
 #[event_handler]
 async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     dotenv().ok();
@@ -49,11 +36,11 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     let repo = env::var("github_repo").unwrap_or("test".to_string());
     let trigger_phrase = env::var("trigger_phrase").unwrap_or("flows summarize".to_string());
     let llm_api_endpoint = env::var("llm_api_endpoint").unwrap_or("https://api.openai.com/v1".to_string());
-    let llm_model_name = env::var("llm_model_name").unwrap_or("gpt-4o".to_string());
+    let llm_model_name = env::var("llm_model_name").unwrap_or("gpt-4".to_string());
     let llm_ctx_size = env::var("llm_ctx_size").unwrap_or("16384".to_string()).parse::<u32>().unwrap_or(0);
     let llm_api_key = env::var("llm_api_key").unwrap_or("LLAMAEDGE".to_string());
 
-
+    // Soft character limit of the input context size (chars)
     let ctx_size_char: usize = (2 * llm_ctx_size).try_into().unwrap_or(0);
 
     let payload = event.unwrap();
@@ -71,7 +58,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
             }
             let p = e.pull_request;
             (
-                p.title.unwrap_or_else(|| "Untitled".to_string()),
+                p.title.unwrap_or("Untitled".to_string()),
                 p.number,
                 p.user.unwrap().login,
             )
@@ -130,16 +117,6 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
         }
     }
     if comment_id == 0u64.into() { return; }
-
-    // **Fetch directory tree**
-    let dir_tree_result = fetch_directory_tree(&owner, &repo, "").await;
-    let dir_tree = match dir_tree_result {
-        Ok(tree) => tree,
-        Err(e) => {
-            log::error!("Error fetching directory tree: {}", e);
-            return;
-        }
-    };
 
     let pulls = octo.pulls(owner.clone(), repo.clone());
     let patch_as_text = pulls.get_patch(pull_number).await.unwrap();
@@ -206,11 +183,6 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
 
     let mut resp = String::new();
     resp.push_str("Hello, I am a [PR summary agent](https://github.com/flows-network/github-pr-summary/) on [flows.network](https://flows.network/). Here are my reviews of code commits in this PR.\n\n------\n\n");
-
-    // **Add directory tree to response**
-    let dir_tree_text = dir_tree.iter().map(|c| format!("{}/{}", c.path, c.name)).collect::<Vec<String>>().join("\n");
-    resp.push_str(&format!("## Directory Tree\n\n{}\n\n", dir_tree_text));
-
     if reviews.len() > 1 {
         log::debug!("Sending all reviews to LLM for summarization");
         let co = ChatOptions {
